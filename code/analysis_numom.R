@@ -6,7 +6,7 @@ userLib <-  "~/R/R_LIBS_USER"
 
 packages <- c("data.table","tidyverse","xgboost",
               "here","foreach","doParallel","arm",
-	      "kernlab")
+	            "kernlab","rio")
 
 for (package in packages) {
   if (!require(package, character.only=T, quietly=T)) {
@@ -21,8 +21,6 @@ for (package in packages) {
 remotes::install_github("yqzhong7/AIPW")
 library(AIPW)
 library(SuperLearner)
-library(tmle3)
-library(sl3)
 
 a <- rio::import(here("data","numom_processed_2023_03_28.csv"))
 
@@ -83,8 +81,6 @@ parallel::clusterEvalQ(my.cluster, {
   .libPaths("~/R/R_LIBS_USER")
   library(AIPW)
 	library(SuperLearner)
-	library(tmle3)
-	library(sl3)
 	library(ranger)
 	library(xgboost)
 })
@@ -158,82 +154,18 @@ par_res <- foreach(i = 1:number_seeds) %dopar% {
 
   aipw_res <- data.frame(algorithm = "AIPW",
                          t(AIPW_SL$result[3,1:4]),
+                         p.value_z = 2*pnorm(-abs(AIPW_SL$result[3,1]/AIPW_SL$result[3,2])),
+                         p.value_t = 2*pt(-abs(AIPW_SL$result[3,1]/AIPW_SL$result[3,2]), df = nrow(covariates) - 1),
                          seed = i)
   names(aipw_res) <- c("Algorithm",
                        "Estimate",
                        "SE", "LCL", "UCL",
+                       "p.val_z", "p.val_t",
                        "Seed")
 
-  sl_ <- make_learner(Stack, unlist(list(
-                                         make_learner(Lrnr_glmnet, alpha = 1),
-					                               make_learner(Lrnr_glmnet, alpha = .5),
-                                         make_learner(Lrnr_glmnet, alpha = 0),
-                                         make_learner(Lrnr_xgboost),
-                                         make_learner(Lrnr_mean),
-                                         make_learner(Lrnr_glm),
-                                         make_learner(Lrnr_ranger),
-                                         make_learner(Lrnr_bayesglm),
-                                         make_learner(Lrnr_svm),
-                                         make_learner(Lrnr_nnet)
-                                         ),
-                                    recursive = TRUE))
-
-  learner <- Lrnr_sl$new(learners = sl_,
-                         metalearner = Lrnr_nnls$new(convex=T),
-			 folds = 10)
-  learner_list <- list(Y = learner,
-                       A = learner)
-
-  ######################################################################
-
-  # PREPARE THE THINGS WE WANT TO FEED IN TO TMLE3
-  ate_spec <- tmle_ATE(treatment_level = 1,
-                       control_level = 0)
-
-  nodes_ <- list(W = names(covariates),
-                 A = "fv_totdens_2_5",
-                 Y = "pree_acog")
-
-  # RUN TMLE3
-  tmle_res <- tmle3(ate_spec,
-                    a,
-                    nodes_,
-                    learner_list)
-
-  g_fit <- tmle_res$likelihood$factor_list[["A"]]$learner
-  tmle_sl_g.res <- data.frame(
-    t(g_fit$fit_object$cv_meta_fit$coefficients),
-    seed = i,
-    model = "g.mod"
-    )
-  names(tmle_sl_g.res)[1:3] <- g_fit$fit_object$cv_meta_fit$params$covariates
-  tmle_sl_g.res
-
-  Q_fit <- tmle_res$likelihood$factor_list[["Y"]]$learner
-  tmle_sl_Q.res <- data.frame(
-    t(Q_fit$fit_object$cv_meta_fit$coefficients),
-    seed = i,
-    model = "Q.mod"
-    )
-  names(tmle_sl_Q.res)[1:3] <- Q_fit$fit_object$cv_meta_fit$params$covariates
-  tmle_sl_Q.res
-
-  tmle3_res <- data.frame(algorithm = "tmle3",
-                          tmle_res$summary[,4:7],
-                          seed = i)
-  names(tmle3_res) <- c("Algorithm",
-                        "Estimate",
-                        "SE", "LCL", "UCL",
-                        "Seed")
-
-  res <- list(
-         rbind(aipw_res,
-               tmle3_res),
-         rbind(aipw_sl_Q.res,
-               aipw_sl_g.res),
-         rbind(tmle_sl_Q.res,
-               tmle_sl_g.res)
-  )
+  res <- list(aipw_res,
+              aipw_sl_Q.res,
+              aipw_sl_g.res)
 
   return(res)
 
@@ -243,7 +175,6 @@ parallel::stopCluster(cl = my.cluster)
 
 seed_res <- do.call(rbind, lapply(1:number_seeds, function(x) par_res[[x]][[1]]))
 seed_res$submission <- submission_list
-seed_res$p.value <- 2*pnorm(-abs(Estimate/SE))
 
 write_csv(seed_res, file = here("data", "seed_results.csv"))
 
@@ -251,11 +182,6 @@ aipw_res <- do.call(rbind, lapply(1:number_seeds, function(x) par_res[[x]][[2]])
 aipw_res$submission <- submission_list
 
 write_csv(aipw_res, file = here("data", "aipw_sl_coef_results.csv"))
-
-tmle_res <- do.call(rbind, lapply(1:number_seeds, function(x) par_res[[x]][[3]]))
-tmle_res$submission <- submission_list
-
-write_csv(tmle_res, file = here("data", "tmle_sl_coef_results.csv"))
 
 seed_res$Seed
 
